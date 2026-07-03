@@ -1,0 +1,21 @@
+{
+  "name": "simdom-worker",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+	 "start": "node index.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.110.0",
+    "axios": "^1.18.1",
+    "dotenv": "^17.4.2",
+    "node-cron": "^4.5.0",
+    "tls": "^0.0.1"
+  }
+}
