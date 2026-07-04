@@ -1,0 +1,8 @@
+Klik dua kali file ini (check.bat) kapanpun ingin lakukan pengecekan. Biarkan jalan 2-3 menit (satu cron cycle), lalu tutup terminal.
+Untuk jadwal otomatis tanpa harus ingat — Windows Task Scheduler:
+
+Buka Task Scheduler → Create Basic Task
+Trigger: pilih jadwal (harian / 2x seminggu)
+Action: jalankan check.bat
+
+Data tetap masuk ke Supabase setiap kali dijalankan.
