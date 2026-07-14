@@ -140,6 +140,59 @@ async function checkSecurityHeaders(webApp) {
   }
 }
 
+async function checkPageSpeed(webApp) {
+  const apiKey = process.env.PAGESPEED_API_KEY;
+  if (!apiKey) return;
+
+  try {
+    const url = `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=${encodeURIComponent(webApp.url)}&key=${apiKey}&strategy=mobile&category=performance&category=accessibility&category=best-practices&category=seo`;
+    
+    const res = await axios.get(url, { timeout: 30000 });
+    const categories = res.data.lighthouseResult?.categories;
+
+    const performance = Math.round((categories?.performance?.score ?? 0) * 100);
+    const accessibility = Math.round((categories?.accessibility?.score ?? 0) * 100);
+    const bestPractices = Math.round((categories?.['best-practices']?.score ?? 0) * 100);
+    const seo = Math.round((categories?.seo?.score ?? 0) * 100);
+    const overall = Math.round((performance + accessibility + bestPractices + seo) / 4);
+
+    // Upsert — update kalau sudah ada, insert kalau belum
+    const { data: existing } = await supabase
+      .from('AuditTeknis')
+      .select('id')
+      .eq('webAppId', webApp.id)
+      .limit(1);
+
+    if (existing && existing.length > 0) {
+      await supabase.from('AuditTeknis').update({
+        pageSpeedScore: overall,
+        pageSpeedPerformance: performance,
+        pageSpeedAccessibility: accessibility,
+        pageSpeedBestPractices: bestPractices,
+        pageSpeedSeo: seo,
+        pageSpeedCheckedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      }).eq('webAppId', webApp.id);
+    } else {
+      await supabase.from('AuditTeknis').insert({
+        id: crypto.randomUUID(),
+        webAppId: webApp.id,
+        pageSpeedScore: overall,
+        pageSpeedPerformance: performance,
+        pageSpeedAccessibility: accessibility,
+        pageSpeedBestPractices: bestPractices,
+        pageSpeedSeo: seo,
+        pageSpeedCheckedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      });
+    }
+
+    console.log(`[PAGESPEED] ${webApp.url} → Score: ${overall}/100 (P:${performance} A:${accessibility} BP:${bestPractices} SEO:${seo})`);
+  } catch (err) {
+    console.log(`[PAGESPEED] ${webApp.url} → ERROR: ${err.message}`);
+  }
+}
+
 async function createFindingIfNeeded(webApp, checkResults) {
   const { isOnline, statusCode, sslValid, daysRemaining, headersScore } = checkResults;
   const candidates = [];
@@ -203,6 +256,29 @@ async function createFindingIfNeeded(webApp, checkResults) {
     });
 
     console.log(`[FINDING] ${webApp.url} → "${candidate.judul}" dibuat`);
+await sendTelegram(
+  `🚨 <b>Temuan Baru</b>\n\n` +
+  `🌐 <b>Domain:</b> ${webApp.url}\n` +
+  `📋 <b>Temuan:</b> ${candidate.judul}\n` +
+  `⚠️ <b>Severity:</b> ${candidate.severity}\n\n` +
+  `Cek dashboard: https://simdom.vercel.app/dashboard/monitoring/temuan`
+);
+  }
+}
+
+async function sendTelegram(message) {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const chatId = process.env.TELEGRAM_CHAT_ID;
+  if (!token || !chatId) return;
+
+  try {
+    await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, {
+      chat_id: chatId,
+      text: message,
+      parse_mode: 'HTML'
+    });
+  } catch (err) {
+    console.log(`[TELEGRAM] ERROR: ${err.message}`);
   }
 }
 
@@ -349,12 +425,36 @@ async function runChecks() {
   }
 }
 
+async function runPageSpeedChecks() {
+  const { data: webApps, error } = await supabase
+    .from('WebApp')
+    .select('id, url, nama')
+    .eq('status', 'AKTIF');
+
+  if (error) return;
+
+  console.log(`PageSpeed checking ${webApps.length} domains...`);
+  
+  // Cek satu per satu dengan delay 2 detik — hindari rate limit
+  for (const webApp of webApps) {
+    await checkPageSpeed(webApp);
+    await new Promise(r => setTimeout(r, 2000));
+  }
+}
+
 
 
 // Jalankan setiap 5 menit
+// Cron setiap 5 menit — HTTP, SSL, Headers
 cron.schedule('*/5 * * * *', () => {
   console.log('--- Cron triggered ---');
   runChecks();
+});
+
+// Cron 1x sehari jam 07.00 — PageSpeed
+cron.schedule('0 7 * * *', () => {
+  console.log('--- PageSpeed Check ---');
+  runPageSpeedChecks();
 });
 
 // Jalankan sekali saat start
