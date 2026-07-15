@@ -3,6 +3,7 @@ const cron = require('node-cron');
 const axios = require('axios');
 const { createClient } = require('@supabase/supabase-js');
 const tls = require('tls');
+const { Resend } = require('resend');
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -263,6 +264,51 @@ await sendTelegram(
   `⚠️ <b>Severity:</b> ${candidate.severity}\n\n` +
   `Cek dashboard: https://simdom.vercel.app/dashboard/monitoring/temuan`
 );
+
+await sendEmail(
+  `🚨 Temuan Baru: ${candidate.judul} — ${webApp.url}`,
+  `
+  <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
+    <div style="background: #1d4ed8; padding: 20px; border-radius: 8px 8px 0 0;">
+      <h2 style="color: white; margin: 0;">🚨 Temuan Baru Terdeteksi</h2>
+      <p style="color: #bfdbfe; margin: 4px 0 0;">SIMDOM — Monitoring Layanan Digital Soppeng</p>
+    </div>
+    <div style="background: #f8fafc; padding: 20px; border-radius: 0 0 8px 8px; border: 1px solid #e2e8f0;">
+      <table style="width: 100%; border-collapse: collapse;">
+        <tr>
+          <td style="padding: 8px 0; color: #64748b; font-size: 14px; width: 140px;">Domain</td>
+          <td style="padding: 8px 0; font-weight: 600; font-size: 14px;">${webApp.url}</td>
+        </tr>
+        <tr>
+          <td style="padding: 8px 0; color: #64748b; font-size: 14px;">Temuan</td>
+          <td style="padding: 8px 0; font-weight: 600; font-size: 14px;">${candidate.judul}</td>
+        </tr>
+        <tr>
+          <td style="padding: 8px 0; color: #64748b; font-size: 14px;">Severity</td>
+          <td style="padding: 8px 0;">
+            <span style="background: ${candidate.severity === 'HIGH' ? '#fee2e2' : '#fef3c7'}; 
+                         color: ${candidate.severity === 'HIGH' ? '#991b1b' : '#92400e'}; 
+                         padding: 2px 8px; border-radius: 4px; font-size: 13px; font-weight: 600;">
+              ${candidate.severity}
+            </span>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding: 8px 0; color: #64748b; font-size: 14px;">Deskripsi</td>
+          <td style="padding: 8px 0; font-size: 14px;">${candidate.deskripsi}</td>
+        </tr>
+      </table>
+      <div style="margin-top: 20px; padding-top: 16px; border-top: 1px solid #e2e8f0;">
+        <a href="https://simdom.vercel.app/dashboard/monitoring/temuan" 
+           style="background: #1d4ed8; color: white; padding: 10px 20px; 
+                  border-radius: 6px; text-decoration: none; font-size: 14px;">
+          Lihat di Dashboard →
+        </a>
+      </div>
+    </div>
+  </div>
+  `
+);
   }
 }
 
@@ -279,6 +325,27 @@ async function sendTelegram(message) {
     });
   } catch (err) {
     console.log(`[TELEGRAM] ERROR: ${err.message}`);
+  }
+}
+
+
+
+async function sendEmail(subject, htmlContent) {
+  const apiKey = process.env.RESEND_API_KEY;
+  const toEmail = process.env.NOTIFICATION_EMAIL;
+  if (!apiKey || !toEmail) return;
+
+  try {
+    const resend = new Resend(apiKey);
+    await resend.emails.send({
+      from: 'SIMDOM Monitoring <onboarding@resend.dev>',
+      to: [toEmail],
+      subject,
+      html: htmlContent
+    });
+    console.log(`[EMAIL] Terkirim ke ${toEmail}: ${subject}`);
+  } catch (err) {
+    console.log(`[EMAIL] ERROR: ${err.message}`);
   }
 }
 
