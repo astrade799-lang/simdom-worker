@@ -215,12 +215,41 @@ async function createFindingIfNeeded(webApp, checkResults) {
   }
 
   if (daysRemaining !== null && daysRemaining <= 30) {
-    candidates.push({
+  const { data: existingSsl } = await supabase
+    .from('Finding')
+    .select('id')
+    .eq('webAppId', webApp.id)
+    .eq('judul', 'SSL Certificate Akan Expired')
+    .eq('status', 'OPEN')
+    .limit(1);
+
+  if (!existingSsl || existingSsl.length === 0) {
+    await supabase.from('Finding').insert({
+      id: crypto.randomUUID(),
+      webAppId: webApp.id,
       judul: 'SSL Certificate Akan Expired',
       deskripsi: `${webApp.url} SSL akan expired dalam ${daysRemaining} hari`,
-      severity: daysRemaining <= 7 ? 'HIGH' : 'MEDIUM'
+      severity: daysRemaining <= 7 ? 'HIGH' : 'MEDIUM',
+      status: 'OPEN',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
     });
+
+    const emoji = daysRemaining <= 7 ? '🚨' : '⚠️'
+    console.log(`[SSL-EXPIRY] ${webApp.url} → ${daysRemaining} hari lagi`)
+    
+    await sendTelegram(
+      `${emoji} <b>Peringatan SSL Akan Expired</b>\n\n` +
+      `🌐 <b>Domain:</b> ${webApp.url}\n` +
+      `📅 <b>Expired dalam:</b> <b>${daysRemaining} hari</b>\n` +
+      `⚠️ <b>Severity:</b> ${daysRemaining <= 7 ? 'HIGH — Segera perpanjang!' : 'MEDIUM — Perlu perhatian'}\n\n` +
+      `Hubungi vendor/pengelola domain untuk perpanjangan SSL.\n` +
+      `Cek dashboard: https://simdom.vercel.app/dashboard/monitoring/temuan`
+    )
+  } else {
+    console.log(`[SSL-EXPIRY] ${webApp.url} → sudah ada finding, skip`)
   }
+}
 
   if (headersScore !== null && headersScore < 50) {
     candidates.push({
