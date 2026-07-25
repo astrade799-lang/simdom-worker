@@ -4,6 +4,7 @@ const axios = require('axios');
 const { createClient } = require('@supabase/supabase-js');
 const tls = require('tls');
 const { Resend } = require('resend');
+const dns = require('dns').promises
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -138,6 +139,220 @@ async function checkSecurityHeaders(webApp) {
     console.log(`[HEADERS] ${webApp.url} → Score: ${score}/100 | HSTS:${hasHsts} XFrame:${hasXFrame} XContent:${hasXContent} CSP:${hasCsp}`);
   } catch (err) {
     console.log(`[HEADERS] ${webApp.url} → ERROR: ${err.message}`);
+  }
+}
+
+async function runChecks() {
+  const { data: webApps, error } = await supabase
+    .from('WebApp')
+    .select('id, url, nama')
+    .eq('status', 'AKTIF');
+
+  if (error) {
+    console.error('Gagal ambil data WebApp:', error.message);
+    return;
+  }
+
+  console.log(`Checking ${webApps.length} domains...`);
+
+  for (const webApp of webApps) {
+    const checkResults = {
+      isOnline: false,
+      statusCode: null,
+      sslValid: null,
+      daysRemaining: null,
+      headersScore: null
+    };
+
+    // HTTP check
+    try {
+      const start = Date.now();
+      const res = await axios.get(webApp.url, {
+        timeout: 10000,
+        maxRedirects: 5,
+        validateStatus: () => true
+      });
+      checkResults.isOnline = res.status < 500;
+      checkResults.statusCode = res.status;
+      const responseTime = Date.now() - start;
+
+      await supabase.from('DomainCheck').insert({
+        id: crypto.randomUUID(),
+        webAppId: webApp.id,
+        isOnline: checkResults.isOnline,
+        statusCode: checkResults.statusCode,
+        responseTime,
+        checkedAt: new Date().toISOString()
+      });
+
+      console.log(`[HTTP] ${webApp.url} → ${checkResults.isOnline ? 'ONLINE' : 'OFFLINE'} (${checkResults.statusCode})`);
+    } catch (err) {
+      await supabase.from('DomainCheck').insert({
+        id: crypto.randomUUID(),
+        webAppId: webApp.id,
+        isOnline: false,
+        statusCode: null,
+        responseTime: null,
+        checkedAt: new Date().toISOString()
+      });
+      console.log(`[HTTP] ${webApp.url} → OFFLINE (timeout)`);
+    }
+
+    // SSL check
+    await new Promise((resolve) => {
+      try {
+        const url = new URL(webApp.url);
+        if (url.protocol !== 'https:') {
+          checkResults.sslValid = false;
+          resolve();
+          return;
+        }
+        const socket = tls.connect(443, url.hostname, { servername: url.hostname }, async () => {
+          const cert = socket.getPeerCertificate();
+          const expiryDate = new Date(cert.valid_to);
+          checkResults.daysRemaining = Math.floor((expiryDate - Date.now()) / (1000 * 60 * 60 * 24));
+          checkResults.sslValid = socket.authorized && checkResults.daysRemaining > 0;
+
+          await supabase.from('SslCheck').insert({
+            id: crypto.randomUUID(),
+            webAppId: webApp.id,
+            isValid: checkResults.sslValid,
+            issuer: cert.issuer?.O || null,
+            expiryDate: expiryDate.toISOString(),
+            daysRemaining: checkResults.daysRemaining,
+            checkedAt: new Date().toISOString()
+          });
+
+          console.log(`[SSL] ${webApp.url} → ${checkResults.sslValid ? 'VALID' : 'INVALID'} (${checkResults.daysRemaining} hari)`);
+          socket.destroy();
+          resolve();
+        });
+
+        socket.on('error', async (err) => {
+          checkResults.sslValid = false;
+          await supabase.from('SslCheck').insert({
+            id: crypto.randomUUID(),
+            webAppId: webApp.id,
+            isValid: false,
+            issuer: null,
+            expiryDate: null,
+            daysRemaining: null,
+            checkedAt: new Date().toISOString()
+          });
+          console.log(`[SSL] ${webApp.url} → ERROR: ${err.message}`);
+          resolve();
+        });
+
+        socket.setTimeout(10000, () => { socket.destroy(); resolve(); });
+      } catch (err) {
+        checkResults.sslValid = false;
+        resolve();
+      }
+    });
+
+    // Security headers check
+    try {
+      const res = await axios.get(webApp.url, {
+        timeout: 10000,
+        maxRedirects: 5,
+        validateStatus: () => true
+      });
+      const headers = res.headers;
+      const hasHsts = !!headers['strict-transport-security'];
+      const hasXFrame = !!headers['x-frame-options'];
+      const hasXContent = !!headers['x-content-type-options'];
+      const hasCsp = !!headers['content-security-policy'];
+      checkResults.headersScore = [hasHsts, hasXFrame, hasXContent, hasCsp].filter(Boolean).length * 25;
+
+      await supabase.from('SecurityHeaderCheck').insert({
+        id: crypto.randomUUID(),
+        webAppId: webApp.id,
+        hasHsts,
+        hasXFrame,
+        hasXContent,
+        hasCsp,
+        score: checkResults.headersScore,
+        checkedAt: new Date().toISOString()
+      });
+
+      console.log(`[HEADERS] ${webApp.url} → Score: ${checkResults.headersScore}/100`);
+    } catch (err) {
+      console.log(`[HEADERS] ${webApp.url} → ERROR: ${err.message}`);
+    }
+
+    // Auto-create finding
+    await createFindingIfNeeded(webApp, checkResults);
+
+    // DNS check
+    await checkDns(webApp);
+  }
+}
+
+async function checkDns(webApp) {
+  try {
+    const hostname = new URL(webApp.url).hostname
+
+    const [aRecords, mxRecords, nsRecords] = await Promise.allSettled([
+      dns.resolve4(hostname),
+      dns.resolveMx(hostname),
+      dns.resolveNs(hostname),
+    ])
+
+    const a = aRecords.status === 'fulfilled' ? aRecords.value : []
+    const mx = mxRecords.status === 'fulfilled' ? mxRecords.value : []
+    const ns = nsRecords.status === 'fulfilled' ? nsRecords.value : []
+    const isResolvable = a.length > 0
+
+    await supabase.from('DnsCheck').insert({
+      id: crypto.randomUUID(),
+      webAppId: webApp.id,
+      isResolvable,
+      aRecords: JSON.stringify(a),
+      mxRecords: JSON.stringify(mx),
+      nsRecords: JSON.stringify(ns),
+      checkedAt: new Date().toISOString()
+    })
+
+    console.log(`[DNS] ${webApp.url} → ${isResolvable ? 'OK' : 'FAILED'} | A:${a.length} MX:${mx.length} NS:${ns.length}`)
+
+    // Auto-create finding jika DNS tidak bisa resolve
+    if (!isResolvable) {
+      const { data: existing } = await supabase
+        .from('Finding')
+        .select('id')
+        .eq('webAppId', webApp.id)
+        .eq('judul', 'DNS Tidak Dapat Di-resolve')
+        .eq('status', 'OPEN')
+        .limit(1)
+
+      if (!existing || existing.length === 0) {
+        await supabase.from('Finding').insert({
+          id: crypto.randomUUID(),
+          webAppId: webApp.id,
+          judul: 'DNS Tidak Dapat Di-resolve',
+          deskripsi: `${hostname} tidak memiliki A record — domain mungkin expired atau nameserver bermasalah`,
+          severity: 'HIGH',
+          status: 'OPEN',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        })
+
+        await sendTelegram(
+          `🔴 <b>DNS Bermasalah</b>\n\n` +
+          `🌐 <b>Domain:</b> ${webApp.url}\n` +
+          `❌ <b>Masalah:</b> DNS tidak dapat di-resolve\n` +
+          `💡 <b>Kemungkinan:</b> Domain expired atau nameserver bermasalah\n\n` +
+          `Cek dashboard: https://simdom.vercel.app/dashboard/monitoring/temuan`
+        )
+
+        console.log(`[DNS] ${webApp.url} → Finding dibuat`)
+      } else {
+        console.log(`[DNS] ${webApp.url} → Finding sudah ada, skip`)
+      }
+    }
+
+  } catch (err) {
+    console.log(`[DNS] ${webApp.url} → ERROR: ${err.message}`)
   }
 }
 
